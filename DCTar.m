@@ -307,25 +307,38 @@ static const char template_header[] = {
             if(type == '0' || type == '\0') {
                 NSString *name = [self nameForObject:tarObject atOffset:location];
                 NSString *filePath = [path stringByAppendingPathComponent:name]; // Create a full path from the name
-                
-                unsigned long long size = [self sizeForObject:tarObject atOffset:location];
+
+                unsigned long long fileSize = [self sizeForObject:tarObject atOffset:location];
                 //NSLog(@"file created: %@",name);
-                
-                if(size == 0) {
+
+                if(fileSize == 0) {
                     [@"" writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:error];
                 }
-                
-                blockCount += (size - 1) / TAR_BLOCK_SIZE + 1; // size/TAR_BLOCK_SIZE rounded up
-                [self writeFileDataForObject:tarObject atLocation:(location + TAR_BLOCK_SIZE) withLength:size atPath:filePath];
-                
+
+                blockCount += (fileSize - 1) / TAR_BLOCK_SIZE + 1; // size/TAR_BLOCK_SIZE rounded up
+                [self writeFileDataForObject:tarObject atLocation:(location + TAR_BLOCK_SIZE) withLength:fileSize atPath:filePath];
+
             } else if(type == '5') {
                 NSString *name = [self nameForObject:tarObject atOffset:location];
                 NSString *directoryPath = [path stringByAppendingPathComponent:name]; // Create a full path from the name
                 [manager createDirectoryAtPath:directoryPath withIntermediateDirectories:YES attributes:nil error:nil]; //Write the directory on filesystem
                 //NSLog(@"directory created: %@",name);
-                
+
             } else if(type == 'g') {
-                
+                //does nothing
+            } else if(type == 'L') { // @LongLink, Identifies the *next* file on the tape as having a long name.
+                // 1. get long file name in following blocks until '\0'
+                unsigned long long longNameBlockCount = 0;
+                NSString *name = [self longNameForObject:tarObject atOffset:location blockCount:&longNameBlockCount];
+                // 2. get data and write to disk
+                unsigned long long fileSize = [self sizeForObject:tarObject atOffset:location + (longNameBlockCount + 1) * TAR_BLOCK_SIZE];
+                // 3. write to file
+                NSString *filePath = [path stringByAppendingPathComponent:name];
+                if (fileSize == 0) {
+                    [@"" writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:error];
+                }
+                blockCount += ((fileSize - 1) / TAR_BLOCK_SIZE + 1) + longNameBlockCount + 1;
+                [self writeFileDataForObject:tarObject atLocation:(location + (longNameBlockCount + 2) * TAR_BLOCK_SIZE) withLength:fileSize atPath:filePath];
             } else if(type > '0' || type < 'Z') {
                 //NSLog(@"unknown type: %c",type);
                 //does nothing
@@ -361,6 +374,29 @@ static const char template_header[] = {
     memcpy(&type, [self dataForObject:object inRange:NSMakeRange((uInt)offset + TAR_TYPE_POSITION, 1)
                            orLocation:offset + TAR_TYPE_POSITION andLength:1].bytes, 1);
     return type;
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////
++ (NSString *)longNameForObject:(id)object atOffset:(unsigned long long)offset blockCount:(unsigned long long *)count
+{
+    char *lNameBytes = NULL;
+
+    unsigned long long location = offset + TAR_BLOCK_SIZE;
+    unsigned long long len = 0;
+
+    do {
+        len += TAR_BLOCK_SIZE;
+        lNameBytes = realloc(lNameBytes, sizeof(char) * len);
+        memcpy(lNameBytes,
+                [self dataForObject:object inRange:NSMakeRange(location, TAR_BLOCK_SIZE) orLocation:location andLength:TAR_BLOCK_SIZE].bytes,
+                TAR_BLOCK_SIZE);
+    } while (lNameBytes[len - 1] != '\0');
+
+    NSString *lName = [NSString stringWithCString:lNameBytes encoding:NSASCIIStringEncoding];
+    free(lNameBytes);
+
+    *count = len / TAR_BLOCK_SIZE;
+
+    return lName;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 + (NSString *)nameForObject:(id)object atOffset:(unsigned long long)offset
